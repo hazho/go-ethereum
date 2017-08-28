@@ -36,8 +36,8 @@ import (
 
 // Ethash proof-of-work protocol constants.
 var (
-	frontierBlockReward   *big.Int = 0 // Block reward in wei for successfully mining a block
-	metropolisBlockReward *big.Int = 0 // Block reward in wei for successfully mining a block upward from Metropolis
+	frontierBlockReward   *big.Int = big.NewInt(0) // Block reward in wei for successfully mining a block
+	metropolisBlockReward *big.Int = big.NewInt(0) // Block reward in wei for successfully mining a block upward from Metropolis
 	maxUncles                      = 2                 // Maximum number of uncles allowed in a single block
 )
 
