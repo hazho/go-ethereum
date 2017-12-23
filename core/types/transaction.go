@@ -137,7 +137,7 @@ func isProtectedV(V *big.Int) bool {
 	return true
 }
 
-// DecodeRLP implements rlp.Encoder
+// EncodeRLP implements rlp.Encoder
 func (tx *Transaction) EncodeRLP(w io.Writer) error {
 	return rlp.Encode(w, &tx.data)
 }
@@ -153,6 +153,7 @@ func (tx *Transaction) DecodeRLP(s *rlp.Stream) error {
 	return err
 }
 
+// MarshalJSON encodes the web3 RPC transaction format.
 func (tx *Transaction) MarshalJSON() ([]byte, error) {
 	hash := tx.Hash()
 	data := tx.data
@@ -168,8 +169,8 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	}
 	var V byte
 	if isProtectedV(dec.V) {
-		chainId := deriveChainId(dec.V).Uint64()
-		V = byte(dec.V.Uint64() - 35 - 2*chainId)
+		chainID := deriveChainId(dec.V).Uint64()
+		V = byte(dec.V.Uint64() - 35 - 2*chainID)
 	} else {
 		V = byte(dec.V.Uint64() - 27)
 	}
@@ -192,10 +193,9 @@ func (tx *Transaction) CheckNonce() bool   { return true }
 func (tx *Transaction) To() *common.Address {
 	if tx.data.Recipient == nil {
 		return nil
-	} else {
-		to := *tx.data.Recipient
-		return &to
 	}
+	to := *tx.data.Recipient
+	return &to
 }
 
 // Hash hashes the RLP encoding of tx.
@@ -207,12 +207,6 @@ func (tx *Transaction) Hash() common.Hash {
 	v := rlpHash(tx)
 	tx.hash.Store(v)
 	return v
-}
-
-// SigHash returns the hash to be signed by the sender.
-// It does not uniquely identify the transaction.
-func (tx *Transaction) SigHash(signer Signer) common.Hash {
-	return signer.Hash(tx)
 }
 
 func (tx *Transaction) Size() common.StorageSize {
@@ -249,7 +243,13 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 // WithSignature returns a new transaction with the given signature.
 // This signature needs to be formatted as described in the yellow paper (v+27).
 func (tx *Transaction) WithSignature(signer Signer, sig []byte) (*Transaction, error) {
-	return signer.WithSignature(tx, sig)
+	r, s, v, err := signer.SignatureValues(tx, sig)
+	if err != nil {
+		return nil, err
+	}
+	cpy := &Transaction{data: tx.data}
+	cpy.data.R, cpy.data.S, cpy.data.V = r, s, v
+	return cpy, nil
 }
 
 // Cost returns amount + gasprice * gaslimit.
@@ -315,22 +315,22 @@ func (tx *Transaction) String() string {
 	)
 }
 
-// Transaction slice type for basic sorting.
+// Transactions is a Transaction slice type for basic sorting.
 type Transactions []*Transaction
 
-// Len returns the length of s
+// Len returns the length of s.
 func (s Transactions) Len() int { return len(s) }
 
-// Swap swaps the i'th and the j'th element in s
+// Swap swaps the i'th and the j'th element in s.
 func (s Transactions) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
-// GetRlp implements Rlpable and returns the i'th element of s in rlp
+// GetRlp implements Rlpable and returns the i'th element of s in rlp.
 func (s Transactions) GetRlp(i int) []byte {
 	enc, _ := rlp.EncodeToBytes(s[i])
 	return enc
 }
 
-// Returns a new set t which is the difference between a to b
+// TxDifference returns a new set t which is the difference between a to b.
 func TxDifference(a, b Transactions) (keep Transactions) {
 	keep = make(Transactions, 0, len(a))
 
@@ -378,31 +378,35 @@ func (s *TxByPrice) Pop() interface{} {
 }
 
 // TransactionsByPriceAndNonce represents a set of transactions that can return
-// transactions in a profit-maximising sorted order, while supporting removing
+// transactions in a profit-maximizing sorted order, while supporting removing
 // entire batches of transactions for non-executable accounts.
 type TransactionsByPriceAndNonce struct {
-	txs   map[common.Address]Transactions // Per account nonce-sorted list of transactions
-	heads TxByPrice                       // Next transaction for each unique account (price heap)
+	txs    map[common.Address]Transactions // Per account nonce-sorted list of transactions
+	heads  TxByPrice                       // Next transaction for each unique account (price heap)
+	signer Signer                          // Signer for the set of transactions
 }
 
 // NewTransactionsByPriceAndNonce creates a transaction set that can retrieve
 // price sorted transactions in a nonce-honouring way.
 //
 // Note, the input map is reowned so the caller should not interact any more with
-// if after providng it to the constructor.
-func NewTransactionsByPriceAndNonce(txs map[common.Address]Transactions) *TransactionsByPriceAndNonce {
+// if after providing it to the constructor.
+func NewTransactionsByPriceAndNonce(signer Signer, txs map[common.Address]Transactions) *TransactionsByPriceAndNonce {
 	// Initialize a price based heap with the head transactions
 	heads := make(TxByPrice, 0, len(txs))
-	for acc, accTxs := range txs {
+	for _, accTxs := range txs {
 		heads = append(heads, accTxs[0])
+		// Ensure the sender address is from the signer
+		acc, _ := Sender(signer, accTxs[0])
 		txs[acc] = accTxs[1:]
 	}
 	heap.Init(&heads)
 
 	// Assemble and return the transaction set
 	return &TransactionsByPriceAndNonce{
-		txs:   txs,
-		heads: heads,
+		txs:    txs,
+		heads:  heads,
+		signer: signer,
 	}
 }
 
@@ -416,9 +420,7 @@ func (t *TransactionsByPriceAndNonce) Peek() *Transaction {
 
 // Shift replaces the current best head with the next one from the same account.
 func (t *TransactionsByPriceAndNonce) Shift() {
-	signer := deriveSigner(t.heads[0].data.V)
-	// derive signer but don't cache.
-	acc, _ := Sender(signer, t.heads[0]) // we only sort valid txs so this cannot fail
+	acc, _ := Sender(t.signer, t.heads[0])
 	if txs, ok := t.txs[acc]; ok && len(txs) > 0 {
 		t.heads[0], t.txs[acc] = txs[0], txs[1:]
 		heap.Fix(&t.heads, 0)
