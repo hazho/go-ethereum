@@ -655,7 +655,7 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNr r
 func (s *PublicBlockChainAPI) EstimateGas(ctx context.Context, args CallArgs) (*hexutil.Big, error) {
 	// Determine the lowest and highest possible gas limits to binary search in between
 	var (
-		lo  uint64 = params.TxGas - 1
+		lo  uint64 = params.TxGas
 		hi  uint64
 		cap uint64
 	)
